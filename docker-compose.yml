@@ -1,0 +1,106 @@
+services:
+  postgresql:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    networks:
+      backend:
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    volumes:
+      - database:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASS:?database password required}
+      POSTGRES_USER: ${PG_USER:-authentik}
+      POSTGRES_DB: ${PG_DB:-authentik}
+
+  redis:
+    image: docker.io/library/redis:alpine
+    command: --save 60 1 --loglevel warning
+    restart: unless-stopped
+    networks:
+      backend:
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 3s
+    volumes:
+      - redis:/data
+
+  server:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2024.10.2}
+    restart: unless-stopped
+    command: server
+    networks:
+      backend:
+      frontend:
+    environment:
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_EMAIL__HOST: ${MAIL_HOST}
+      AUTHENTIK_EMAIL__PORT: 465
+      AUTHENTIK_EMAIL__USERNAME: ${MAIL_USERNAME}
+      AUTHENTIK_EMAIL__PASSWORD: ${MAIL_PASSWORD}
+      AUTHENTIK_EMAIL__USE_SSL: true
+      AUTHENTIK_EMAIL__TIMEOUT: 10
+      AUTHENTIK_EMAIL__FROM: ${MAIL_FROM}
+    labels:
+      traefik.enable: true
+      traefik.http.routers.authentik.rule: Host(`${SUBDOMAIN}`) || HostRegexp(`{subdomain:[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?}.${DOMAIN}`) && PathPrefix(`/outpost.goauthentik.io/`)
+      traefik.http.routers.authentik.entryPoints: websecure
+      traefik.http.routers.authentik.tls: true
+      traefik.http.routers.authentik.service: authentik
+      traefik.http.services.authentik.loadbalancer.server.port: 9000
+    volumes:
+      - ${MOUNT_ROOT}/authentik/media:/media
+      - ${MOUNT_ROOT}/authentik/custom-templates:/templates
+    ports:
+      - "${COMPOSE_PORT_HTTP:-9000}:9000"
+      - "${COMPOSE_PORT_HTTPS:-9443}:9443"
+    depends_on:
+      - postgresql
+      - redis
+
+  worker:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2024.10.2}
+    restart: unless-stopped
+    command: worker
+    networks:
+      backend:
+    environment:
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+    user: ${PUID}:${PGID}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${MOUNT_ROOT}/authentik/media:/media
+      - ${MOUNT_ROOT}/authentik/certs:/certs
+      - ${MOUNT_ROOT}/authentik/custom-templates:/templates
+    depends_on:
+      - postgresql
+      - redis
+
+volumes:
+  database:
+    driver: local
+  redis:
+    driver: local
+
+networks:
+  frontend:
+    external: true
+  backend:
+    external: true
